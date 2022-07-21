@@ -1,0 +1,126 @@
+name: Create Release Branch
+description: "description"
+inputs:
+  branch_name:  # id of input
+    description: 'Branch to create a release'
+    required: true
+    default: 'master'
+  token: # id of input
+    description: 'Personal access token (PAT) used to fetch the repository'
+    required: true
+    default: ${{ github.token }}
+  string_version_files:
+    description: 'Path to files contains version list. files should be comma separated'
+    default: ''
+    required: false
+  numeric_version_files:
+    description: 'Path to files contains version list. files should be comma separated'
+    default: ''
+    required: false
+  telegram_token:
+    description: 'Telegram token'
+    default: ''
+    required: false
+  telegram_to:
+    description: 'Telegram chatId'
+    default: ''
+    required: false
+runs:
+  using: "composite"
+  steps:
+    - name: Check out code
+      uses: actions/checkout@v3
+      with:
+        token: ${{ inputs.token }}
+
+    - name: Calculate current version
+      id: current_version_calculator
+      shell: bash
+      run: |
+        . <(grep applicationVersion gradle.properties)
+        current_version=$applicationVersion
+        current_numeric_version=$(echo $current_version | sed -e 's/\.//g')
+        current_numeric_version=${current_numeric_version}0
+        echo "current_numeric_version=${current_numeric_version}" >> $GITHUB_ENV
+        echo "current_version=${current_version}" >> $GITHUB_ENV
+
+    - name: Calculate next version for master
+      id: next_master_version_calculator
+      if: inputs.branch_name == 'master'
+      shell: bash
+      run: |
+        next_version=$(echo ${current_version} | awk -F. -v OFS=. '{$2 += 1 ; print}')
+        updating_branch=master
+        new_release_branch=$(echo release/${current_version})
+        echo "next_version=${next_version}" >> $GITHUB_ENV
+        echo "updating_branch=${updating_branch}" >> $GITHUB_ENV
+        echo "new_release_branch=${new_release_branch}" >> $GITHUB_ENV
+
+    - name: Calculate next version for minor release
+      id: next_minor_release_version_calculator
+      if: contains(inputs.branch_name, 'release/')
+      shell: bash
+      run: |
+        next_version=$(echo ${current_version} | awk -F. -v OFS=. '{$NF += 1 ; print}')
+        updating_branch=$(echo release/${next_version})
+        new_release_branch=$updating_branch
+        echo "next_version=${next_version}" >> $GITHUB_ENV
+        echo "updating_branch=${updating_branch}" >> $GITHUB_ENV
+        echo "new_release_branch=${new_release_branch}" >> $GITHUB_ENV
+
+    - name: Create major release
+      id: create_major_release
+      if: inputs.branch_name == 'master'
+      shell: bash
+      run: |
+        git checkout -b release/${current_version}
+        git push origin release/${current_version}
+
+    - name: Updating branch
+      id: updating_branch
+      if: contains(inputs.branch_name, 'release/') || inputs.branch_name == 'master'
+      shell: bash
+      env:
+        string_version_files: ${{ inputs.string_version_files }}
+        numeric_version_files: ${{ inputs.numeric_version_files }}
+      run: |
+        next_numeric_version=$(echo $next_version | sed -e 's/\.//g')
+        next_numeric_version=${next_numeric_version}0
+        
+        if [ "${updating_branch}" = "master" ]; then
+          git checkout ${updating_branch}
+        else
+          git checkout -b ${updating_branch}
+        fi
+        
+        for path_with_regular in ${string_version_files//,/ }; do
+          path=${path_with_regular%:*}
+          regular=${path_with_regular#*:}
+          echo $regular 
+          echo $path
+          sed -E -i "s/(.*${regular}.*)(${current_version})(.*)/\1${next_version}\3/" ${path}
+        done
+        
+        for path_with_numeric_version in ${numeric_version_files//,/ }; do
+          path=${path_with_numeric_version%:*}
+          regular=${path_with_numeric_version#*:}
+          echo $regular 
+          echo $path
+          sed -E -i "s/(.*${regular}.*)(${current_numeric_version})(.*)/\1${next_numeric_version}\3/" ${path}
+        done
+        
+        git config --global user.email "${GITHUB_ACTOR}"
+        git config --global user.name "${GITHUB_ACTOR}@users.noreply.github.com"
+        git add -A
+        git commit -m "Bump version to ${next_version}"
+        git push origin ${updating_branch}
+
+    - name: send telegram message on create  release
+      if: contains(inputs.branch_name, 'release/') || inputs.branch_name == 'master'
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ inputs.telegram_to }}
+        token: ${{ inputs.telegram_token }}
+        message: |
+          ${{ github.actor }} created release branch ${{ env.new_release_branch }}
+          Repository: ${{ github.repository }}
